@@ -15,6 +15,27 @@
 // before anything is dispatched. A step that cannot be matched stops the run
 // and says how far it got, rather than clicking whatever is there now: this is
 // the operator's real browser, and a misplaced click has real effects.
+//
+// Hand-written steps. A recording replays one fixed path; a flow whose screens
+// vary between runs (generated questions, a step that only sometimes appears,
+// a backend that takes minutes) is easier to write by hand in the saved file.
+// These run in the host, not the extension:
+//   { tool: "script", args: { body } }
+//     An async function body run in the page, after the workflow's top-level
+//     "prelude" (shared helpers, written once). Throw to stop the run. One
+//     call to the page must finish in ~20s (the extension's CDP timeout), so
+//     wait with wait_for, not inside a script.
+//   { tool: "wait_for", args: { js, timeout_s = 30, fail_js?, message? } }
+//     Polls the page from the host until the expression `js` (prelude in
+//     scope) is truthy. Each poll is one short evaluation, so the wait can be
+//     minutes long and page timers (throttled in background tabs) are not
+//     involved. If `fail_js` returns a non-empty string, the run stops with it.
+//   { tool: "repeat", args: { steps, until_js, max = 50 } }
+//     Runs `steps` until `until_js` is truthy (checked before each pass), for
+//     sections whose length varies, like a list of generated questions.
+//   { tool: "execute_code", args: { code, timeout_s? } }
+//     Code for the execute_code sandbox, with `tabId` and `params` already
+//     defined. Only under the hybrid server, which owns the sandbox.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -216,8 +237,10 @@ export function savedWorkflowsNote() {
   );
 }
 
-export function createWorkflows(dispatch) {
+export function createWorkflows(dispatch, { codeRunner = () => null } = {}) {
   // dispatch(tool, args) -> MCP result envelope, bypassing the journal.
+  // codeRunner() -> the execute_code sandbox's runCode(code, opts), or null
+  // when this server has none (or it is still starting).
   const journal = []; // { tool, args, tabId, anchor, ok }
   const marks = new Map(); // tabId -> journal length at the last save/run
   const refs = new Map(); // tabId -> Map(ref -> { role, name })
@@ -348,6 +371,10 @@ export function createWorkflows(dispatch) {
       return `${i}. ${a.action}${target}`;
     }
     if (s.tool === "javascript_tool") return `${i}. javascript ${JSON.stringify(String(a.text).slice(0, 60))}`;
+    if (s.tool === "script") return `${i}. script ${s.name ? JSON.stringify(s.name) : JSON.stringify(String(a.body).slice(0, 60))}`;
+    if (s.tool === "wait_for") return `${i}. wait_for ${JSON.stringify(a.message || s.name || String(a.js).slice(0, 60))}`;
+    if (s.tool === "repeat") return `${i}. repeat ${(a.steps || []).length} steps until ${JSON.stringify(s.name || String(a.until_js).slice(0, 60))}`;
+    if (s.tool === "execute_code") return `${i}. execute_code ${s.name ? JSON.stringify(s.name) : JSON.stringify(String(a.code).slice(0, 60))}`;
     return `${i}. ${s.tool}`;
   }
 
@@ -413,7 +440,123 @@ export function createWorkflows(dispatch) {
     return { miss: last?.miss === "covered" ? `covered by <${last.by}>` : last?.miss === "text" ? `found a different element ("${last.saw}")` : last?.miss === "ambiguous" ? `matched ${last.n} elements with that text` : last?.miss || "not found" };
   }
 
-  async function run({ name, tabId, params = {}, screenshot = true, timeout_s }) {
+  // --- Hand-written steps ---------------------------------------------------
+
+  // A hand-written page body, with the workflow's prelude in scope. It may
+  // await and return; what it returns comes back as the step's value.
+  const pageBody = (prelude, body) => `(async () => {\n${prelude || ""}\n${body}\n})()`;
+  const pageTest = (prelude, expr) => pageBody(prelude, `return !!(${expr});`);
+  // Errors thrown in the page come back as "Error: Error: msg"; say it once.
+  const errText = (t) => t.replace(/^(Error: )+/, "").split("\n")[0].slice(0, 300);
+
+  // Evaluate in the page: { value } (JSON-decoded when it can be), or { error }.
+  async function evalPage(tabId, code) {
+    const t = textOf(await dispatch("javascript_tool", { action: "javascript_exec", text: code, tabId }));
+    if (FAILED.test(t)) return { error: errText(t) };
+    try {
+      return { value: JSON.parse(t) };
+    } catch {
+      return { value: t };
+    }
+  }
+
+  const what = (s) => describe(s, 0).replace(/^\d+\. /, "");
+
+  // Run one step. Returns null when it succeeded, else why the run stops.
+  // ctx: { tabId, params, waitMs, prelude, first } — first skips the
+  // where-is-the-page check, as for step 1 of a recording.
+  async function runStep(s, ctx, label) {
+    const { tabId, params, waitMs, prelude } = ctx;
+    const ts = Date.now();
+    const a = substitute(s.args || {}, params);
+    const stop = (why) => `step ${label} (${what(s)}): ${why}`;
+
+    if (s.tool === "script") {
+      const r = await evalPage(tabId, pageBody(prelude, a.body));
+      return r.error ? stop(r.error) : null;
+    }
+
+    if (s.tool === "wait_for") {
+      const limit = (a.timeout_s > 0 ? a.timeout_s : 30) * 1000;
+      const deadline = Date.now() + limit;
+      let last = null;
+      while (true) {
+        const r = await evalPage(tabId, pageTest(prelude, a.js));
+        if (r.value === true) return null;
+        // An evaluation that throws is usually the page mid-navigation; keep
+        // polling, and report the last error if the wait runs out.
+        last = r.error || last;
+        if (a.fail_js) {
+          const f = await evalPage(tabId, pageBody(prelude, `const v = (${a.fail_js}); return v ? String(v) : "";`));
+          if (typeof f.value === "string" && f.value) return stop(f.value);
+        }
+        if (Date.now() >= deadline) {
+          return stop(`still not true after ${limit / 1000}s${a.message ? ` (${a.message})` : ""}${last ? `; last error: ${last}` : ""}`);
+        }
+        await sleep(POLL_MS);
+      }
+    }
+
+    if (s.tool === "repeat") {
+      const max = a.max > 0 ? a.max : 50;
+      const steps = Array.isArray(s.args?.steps) ? s.args.steps : [];
+      for (let pass = 1; ; pass++) {
+        const done = await evalPage(tabId, pageTest(prelude, a.until_js));
+        if (done.value === true) return null;
+        if (pass > max) return stop(`until_js still false after ${max} passes`);
+        for (let j = 0; j < steps.length; j++) {
+          const why = await runStep(steps[j], { ...ctx, first: false }, `${label}, pass ${pass}, sub-step ${j + 1}`);
+          if (why) return why;
+        }
+      }
+    }
+
+    if (s.tool === "execute_code") {
+      const runCode = codeRunner();
+      if (!runCode) return stop("execute_code steps need the hybrid server's sandbox, which is not available here (or still starting; try again shortly)");
+      try {
+        const res = await runCode(
+          `const tabId = ${JSON.stringify(tabId)};\nconst params = ${JSON.stringify(params)};\n${a.code}`,
+          a.timeout_s > 0 ? { timeoutMs: a.timeout_s * 1000 } : {}
+        );
+        return res?.error ? stop(errText(String(res.error))) : null;
+      } catch (err) {
+        return stop(errText(String(err?.message ?? err)));
+      }
+    }
+
+    // A recorded step: wait until the page is where it was when this step was
+    // recorded. This is what keeps a step with no element to wait for (a
+    // navigate, typing) from running before the previous step's consequence
+    // has arrived.
+    const args = { ...a, tabId };
+    let tLoc = 0, tAct = 0;
+    if (!ctx.first && s.at) {
+      const want = substitute(s.at, params);
+      const deadline = Date.now() + waitMs;
+      let here = null;
+      while (Date.now() < deadline && (here = await js(tabId, HERE).catch(() => null)) !== want) await sleep(POLL_MS);
+      if (here !== want) return stop(`the page is at ${JSON.stringify(here)}, but the recorded flow was at ${JSON.stringify(want)} here`);
+    }
+    if (s.anchor) {
+      const where = await locate(tabId, substitute(s.anchor, params), waitMs);
+      tLoc = Date.now() - ts;
+      if (where.miss) return stop(`element ${where.miss} (waited ${waitMs / 1000}s; if the page is just slow, re-run with a larger timeout_s)`);
+      delete args.coordinate;
+      delete args.ref;
+      Object.assign(args, where);
+    }
+    const r = await dispatch(s.tool, args);
+    tAct = Date.now() - ts - tLoc;
+    const text = textOf(r);
+    if (FAILED.test(text)) return stop(text.split("\n")[0].slice(0, 200));
+    // Let a click's consequences land before the next step is matched.
+    if (s.tool === "computer" || s.tool === "form_input") await settle(tabId, SETTLE_QUIET_MS, SETTLE_MAX_MS);
+    if (process.env.OCIC_WORKFLOWS_DEBUG) process.stderr.write(`[workflow] step ${label} ${what(s)} ${Date.now() - ts}ms (locate ${tLoc}, act ${tAct}, settle ${Date.now() - ts - tLoc - tAct})\n`);
+    return null;
+  }
+
+  async function run({ name, tabId, params = {}, screenshot = true, timeout_s, from_step, to_step }) {
     const wf = list().find((w) => w.name === slug(name));
     if (!wf) {
       const names = list().map((w) => w.name);
@@ -428,57 +571,29 @@ export function createWorkflows(dispatch) {
         `Fixed in every run: ${fixedValues(wf.steps).map((v) => JSON.stringify(v)).join(", ") || "nothing"}. ` +
         `If the task needs a different value for one of those, do the flow by hand (and re-save it with that value as a param).` }] };
     }
+    const n = wf.steps.length;
+    const from = from_step ?? 1;
+    const to = to_step ?? n;
+    if (![from, to].every((v) => Number.isInteger(v) && v >= 1 && v <= n) || from > to) {
+      return { content: [{ type: "text", text: `Workflow "${wf.name}" has steps 1-${n}; from_step ${from} / to_step ${to} is not a range in it. Nothing was run.` }] };
+    }
 
     const waitMs = (timeout_s > 0 ? timeout_s : wf.timeout_s > 0 ? wf.timeout_s : ANCHOR_WAIT_MS / 1000) * 1000;
+    const ctx = { tabId, params, waitMs, prelude: substitute(wf.prelude || "", params) };
     const t0 = Date.now();
-    const log = [];
+    let last = from - 1;
     let stopped = null;
-    for (let i = 0; i < wf.steps.length; i++) {
-      const s = wf.steps[i];
-      const ts = Date.now();
-      const args = { ...substitute(s.args, params), tabId };
-      let tLoc = 0, tAct = 0;
-      // Wait until the page is where it was when this step was recorded. This is
-      // what keeps a step with no element to wait for (a navigate, typing) from
-      // running before the previous step's consequence has arrived.
-      if (i > 0 && s.at) {
-        const want = substitute(s.at, params);
-        const deadline = Date.now() + waitMs;
-        let here = null;
-        while (Date.now() < deadline && (here = await js(tabId, HERE).catch(() => null)) !== want) await sleep(POLL_MS);
-        if (here !== want) {
-          stopped = `step ${i + 1} (${describe(s, i + 1).replace(/^\d+\. /, "")}): the page is at ${JSON.stringify(here)}, but the recorded flow was at ${JSON.stringify(want)} here`;
-          break;
-        }
-      }
-      if (s.anchor) {
-        const where = await locate(tabId, substitute(s.anchor, params), waitMs);
-        tLoc = Date.now() - ts;
-        if (where.miss) {
-          stopped = `step ${i + 1} (${describe(s, i + 1).replace(/^\d+\. /, "")}): element ${where.miss} (waited ${waitMs / 1000}s; if the page is just slow, re-run with a larger timeout_s)`;
-          break;
-        }
-        delete args.coordinate;
-        delete args.ref;
-        Object.assign(args, where);
-      }
-      const r = await dispatch(s.tool, args);
-      tAct = Date.now() - ts - tLoc;
-      const text = textOf(r);
-      if (FAILED.test(text)) {
-        stopped = `step ${i + 1} (${describe(s, i + 1).replace(/^\d+\. /, "")}): ${text.split("\n")[0].slice(0, 200)}`;
-        break;
-      }
-      log.push(i + 1);
-      // Let a click's consequences land before the next step is matched.
-      if (s.tool === "computer" || s.tool === "form_input") await settle(tabId, SETTLE_QUIET_MS, SETTLE_MAX_MS);
-      if (process.env.OCIC_WORKFLOWS_DEBUG) process.stderr.write(`[workflow] step ${i + 1} ${describe(s, i + 1)} ${Date.now() - ts}ms (locate ${tLoc}, act ${tAct}, settle ${Date.now() - ts - tLoc - tAct})\n`);
+    for (let i = from - 1; i < to; i++) {
+      stopped = await runStep(wf.steps[i], { ...ctx, first: i === 0 }, String(i + 1));
+      if (stopped) break;
+      last = i + 1;
     }
     if (!stopped) await settle(tabId, FINAL_QUIET_MS, FINAL_MAX_MS);
     marks.set(tabId, journal.length);
+    const range = from === 1 && to === n ? `all ${n} steps` : `steps ${from}-${to} of ${n}`;
     const head = stopped
-      ? `Workflow "${wf.name}" STOPPED at ${stopped}. Steps 1-${log.length} of ${wf.steps.length} ran; nothing after that was attempted. Look at the page and finish by hand.`
-      : `Workflow "${wf.name}" ran all ${wf.steps.length} steps in ${Date.now() - t0}ms.`;
+      ? `Workflow "${wf.name}" STOPPED at ${stopped}. ${last >= from ? `Steps ${from}-${last}` : "No steps"} of ${n} ran; nothing after that was attempted. Look at the page and finish by hand, or fix the step and resume with from_step: ${last + 1}.`
+      : `Workflow "${wf.name}" ran ${range} in ${Date.now() - t0}ms.`;
     const content = [{ type: "text", text: head }];
     if (screenshot) {
       const shot = await dispatch("computer", { action: "screenshot", tabId });

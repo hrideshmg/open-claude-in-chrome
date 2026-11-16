@@ -28,7 +28,7 @@ import {
 } from "./common.js";
 import { generateTsApi, WORKFLOWS_ENABLED } from "../tool-definitions.js";
 import { workflowInstructions } from "../workflows.js";
-import { onRecordingEvent } from "../tool-runtime.js";
+import { onRecordingEvent, setCodeRunner } from "../tool-runtime.js";
 
 const NAMESPACE = "chrome";
 
@@ -136,6 +136,8 @@ async function main() {
         namespace: NAMESPACE
       });
       await prewarmSandbox(runCode);
+      // Saved workflows' execute_code steps run in the same sandbox.
+      setCodeRunner(runCode);
     } catch (err) {
       runCodeError = err;
       process.stderr.write(

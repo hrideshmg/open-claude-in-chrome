@@ -620,7 +620,7 @@ const ALL_TOOLS = [
   {
     name: "workflow_save",
     description:
-      "Save the browser actions you just performed on a tab as a named workflow for this project, so the next time the flow is needed it runs in ONE workflow_run call instead of step by step. Call it right after finishing a multi-step flow that is likely to be repeated (a form submission, a login, reaching a deep page, a multi-filter search). It keeps the successful actions on the tab since its last save or run; screenshots, reads and failed attempts are left out. Values that change between runs become params by example: params {title: \"Printer jam\"} turns every \"Printer jam\" in the flow into {{title}}. The response lists the saved steps; save again with drop to remove any that were exploration rather than the flow. If any step had to wait a long time for the page (generating, uploading, processing), set timeout_s with a generous margin over how long it took, since load times vary between runs; the default is 6 seconds per step.",
+      "Save the browser actions you just performed on a tab as a named workflow for this project, so the next time the flow is needed it runs in ONE workflow_run call instead of step by step. Call it right after finishing a multi-step flow that is likely to be repeated (a form submission, a login, reaching a deep page, a multi-filter search). It keeps the successful actions on the tab since its last save or run; screenshots, reads and failed attempts are left out. Values that change between runs become params by example: params {title: \"Printer jam\"} turns every \"Printer jam\" in the flow into {{title}}. The response lists the saved steps; save again with drop to remove any that were exploration rather than the flow. If any step had to wait a long time for the page (generating, uploading, processing), set timeout_s with a generous margin over how long it took, since load times vary between runs; the default is 6 seconds per step. A recording replays one fixed path; when the screens vary between runs (generated content, a screen that only sometimes appears, a backend that takes minutes), edit the saved JSON file (.claude/ocic-workflows/<name>.json) by hand instead. Its \"steps\" may mix recorded steps with these, and a top-level \"prelude\" string holds page helpers shared by every script, wait_for and repeat: {\"tool\":\"script\",\"args\":{\"body\":\"<async function body run in the page; throw to stop the run; must finish in ~20s>\"}}, {\"tool\":\"wait_for\",\"args\":{\"js\":\"<page expression, polled from the host until truthy>\",\"timeout_s\":120,\"fail_js\":\"<optional: expression giving a message to stop with>\",\"message\":\"what it waits for\"}}, {\"tool\":\"repeat\",\"args\":{\"until_js\":\"<expression checked before each pass>\",\"max\":30,\"steps\":[...]}}, {\"tool\":\"execute_code\",\"args\":{\"code\":\"<execute_code body; tabId and params are defined>\"}}. Any step may carry a \"name\" for messages. Try an edited step with workflow_run from_step/to_step.",
     paramShape: {
       name: z.string().describe('Short name, e.g. "create-ticket".'),
       description: z.string().describe("One line: what the workflow does and when to use it."),
@@ -652,7 +652,19 @@ const ALL_TOOLS = [
         .number()
         .positive()
         .optional()
-        .describe("Override, for this run, how many seconds each step waits for its element (default: the workflow's saved value, else 6).")
+        .describe("Override, for this run, how many seconds each step waits for its element (default: the workflow's saved value, else 6)."),
+      from_step: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Start at this step (1-based) instead of the first, e.g. to resume after a run stopped there and you fixed the step or finished it by hand."),
+      to_step: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Stop after this step (1-based, inclusive). With from_step, runs just part of a workflow, e.g. to try a step you edited.")
     }
   },
   {

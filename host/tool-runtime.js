@@ -292,7 +292,14 @@ async function dispatch(toolName, args) {
   }
 }
 
-const workflows = WORKFLOWS_ENABLED ? createWorkflows(dispatch) : null;
+// The execute_code sandbox, when the server embedding this runtime has one
+// (server-hybrid.js); workflow execute_code steps run in it.
+let codeRunner = null;
+export function setCodeRunner(runCode) {
+  codeRunner = runCode;
+}
+
+const workflows = WORKFLOWS_ENABLED ? createWorkflows(dispatch, { codeRunner: () => codeRunner }) : null;
 
 export async function callTool(toolName, args) {
   noteActivity();

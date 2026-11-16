@@ -101,6 +101,15 @@ On a 7-field form (Sonnet, Firefox, 2 to 4 sessions each):
 | By hand | 29 | 44s | $0.10 |
 | Saved workflow | 7 | 26s | $0.03 |
 
+A recording replays one fixed path. When the screens vary between runs (generated
+content, a screen that only sometimes shows up, a backend that takes minutes), edit the
+saved JSON by hand. Steps can mix recorded actions with `script` (page code that shares
+the workflow's `prelude` helpers), `wait_for` (a page condition polled from the host, so
+it can wait for minutes), `repeat` (sub-steps until a condition holds) and `execute_code`
+(the sandbox, hybrid server only). The full shapes are in the `workflow_save` description
+and at the top of `host/workflows.js`. `workflow_run` takes `from_step` / `to_step` to
+resume a stopped run or try one edited step.
+
 Set `OCIC_WORKFLOWS=0` to turn this off.
 
 ### Recording
