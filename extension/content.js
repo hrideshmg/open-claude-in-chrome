@@ -630,7 +630,7 @@
   //  - MINIMUM JERK: bell-shaped speed, peaking a bit before the midpoint,
   //    with a longer deceleration (aiming) than acceleration.
   //  - SQUASH: the pointer compresses on press and springs back.
-  const CURSOR_IDLE_HIDE_MS = 3000;
+  const CURSOR_IDLE_HIDE_MS = 10000;
   let cursorHost = null, cursorEl = null, cursorRoot = null, cursorHideTimer = null;
   let cur = null;        // rendered position {x,y}
   let anim = null;       // active segment list
