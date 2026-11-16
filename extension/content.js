@@ -157,6 +157,13 @@
     return true;
   }
 
+  // A file input is a valid target even when the page hides it (the usual
+  // "Attach files" button drives a display:none input), because file_upload
+  // sets its files directly and never needs the input to be on screen.
+  function isFileInput(el) {
+    return el.tagName.toLowerCase() === "input" && (el.type || "").toLowerCase() === "file";
+  }
+
   // --- Accessibility tree generation ---
   function generateAccessibilityTree(options = {}) {
     const filter = options.filter || "all";
@@ -211,7 +218,9 @@
       const shouldShow =
         (filter === "all" && (role || name)) ||
         (filter === "interactive" && interactive);
-      const visible = shouldShow && isVisible(el);
+      const onScreen = shouldShow && isVisible(el);
+      const hiddenFileInput = shouldShow && !onScreen && isFileInput(el);
+      const visible = onScreen || hiddenFileInput;
 
       if (visible) {
         const ref = getOrAssignRef(el);
@@ -230,6 +239,7 @@
         if (el.getAttribute("aria-checked")) line += ` checked=${el.getAttribute("aria-checked")}`;
         if (el.getAttribute("aria-selected")) line += ` selected=${el.getAttribute("aria-selected")}`;
         if (el.disabled) line += " disabled";
+        if (hiddenFileInput) line += " hidden";
 
         // Select options
         if (tag === "select") {
@@ -331,7 +341,8 @@
 
     for (const el of all) {
       if (results.length >= 20) break;
-      if (!isVisible(el)) continue;
+      const hidden = !isVisible(el);
+      if (hidden && !isFileInput(el)) continue;
 
       const tag = el.tagName.toLowerCase();
       if (["script", "style", "noscript", "template"].includes(tag)) continue;
@@ -368,6 +379,9 @@
           // discovering the miss afterwards.
           offViewport:
             cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight,
+          // A hidden file input has no box, so its coordinates mean nothing;
+          // it is only useful as a file_upload target.
+          hidden,
         });
       }
     }

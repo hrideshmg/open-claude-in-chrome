@@ -2053,6 +2053,11 @@ const toolHandlers = {
     let text = `Found ${results.length} element(s) matching "${query}":\n\n`;
     let anyOff = false;
     for (const r of results) {
+      if (r.hidden) {
+        // No box, so no coordinates: a hidden file input is only a file_upload target.
+        text += `[${r.ref}] ${r.role} "${r.name}" [HIDDEN file input: use with file_upload]\n`;
+        continue;
+      }
       text += `[${r.ref}] ${r.role} "${r.name}" at (${r.coordinates[0]}, ${r.coordinates[1]})`;
       if (r.offViewport) {
         anyOff = true;
