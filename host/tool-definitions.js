@@ -620,7 +620,7 @@ const ALL_TOOLS = [
   {
     name: "workflow_save",
     description:
-      "Save the browser actions you just performed on a tab as a named workflow for this project, so the next time the flow is needed it runs in ONE workflow_run call instead of step by step. Call it right after finishing a multi-step flow that is likely to be repeated (a form submission, a login, reaching a deep page, a multi-filter search). It keeps the successful actions on the tab since its last save or run; screenshots, reads and failed attempts are left out. Values that change between runs become params by example: params {title: \"Printer jam\"} turns every \"Printer jam\" in the flow into {{title}}. The response lists the saved steps; save again with drop to remove any that were exploration rather than the flow.",
+      "Save the browser actions you just performed on a tab as a named workflow for this project, so the next time the flow is needed it runs in ONE workflow_run call instead of step by step. Call it right after finishing a multi-step flow that is likely to be repeated (a form submission, a login, reaching a deep page, a multi-filter search). It keeps the successful actions on the tab since its last save or run; screenshots, reads and failed attempts are left out. Values that change between runs become params by example: params {title: \"Printer jam\"} turns every \"Printer jam\" in the flow into {{title}}. The response lists the saved steps; save again with drop to remove any that were exploration rather than the flow. If any step had to wait a long time for the page (generating, uploading, processing), set timeout_s with a generous margin over how long it took, since load times vary between runs; the default is 6 seconds per step.",
     paramShape: {
       name: z.string().describe('Short name, e.g. "create-ticket".'),
       description: z.string().describe("One line: what the workflow does and when to use it."),
@@ -632,17 +632,27 @@ const ALL_TOOLS = [
       drop: z
         .array(z.number())
         .optional()
-        .describe("Step numbers (from the list a previous save returned) to leave out.")
+        .describe("Step numbers (from the list a previous save returned) to leave out."),
+      timeout_s: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Seconds each step waits for its element to appear before the run stops. Default 6; raise it for flows that wait on slow pages.")
     }
   },
   {
     name: "workflow_run",
     description:
-      "Run a saved workflow on a tab in one call. Saved workflows for this project are listed in the tabs_context_mcp result. Each step re-finds the element it used when recorded (waiting for it, scrolling it into view), so it survives layout changes; it stops at the first step it cannot match or that fails, and says how far it got so you can finish by hand. Returns a screenshot of the end state.",
+      "Run a saved workflow on a tab in one call. Saved workflows for this project are listed in the tabs_context_mcp result. Each step re-finds the element it used when recorded (waiting for it, scrolling it into view), so it survives layout changes; it stops at the first step it cannot match or that fails, and says how far it got so you can finish by hand. Each step waits up to 6 seconds for its element unless the workflow saved a longer timeout_s; if a run stopped on \"not found\" because the page was slow, run it again with a larger timeout_s. Returns a screenshot of the end state.",
     paramShape: {
       name: z.string().describe("Workflow name."),
       tabId: z.number().describe("Tab to run it on."),
-      params: z.record(z.string()).optional().describe("Values for the workflow's params.")
+      params: z.record(z.string()).optional().describe("Values for the workflow's params."),
+      timeout_s: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Override, for this run, how many seconds each step waits for its element (default: the workflow's saved value, else 6).")
     }
   },
   {

@@ -21,6 +21,8 @@ import path from "node:path";
 
 const DIR = path.join(process.cwd(), ".claude", "ocic-workflows");
 const JOURNAL_MAX = 500;
+// How long a step waits for its element (or for the page to reach the recorded
+// URL) before the run stops. A workflow can override it with timeout_s.
 const ANCHOR_WAIT_MS = 6000;
 const POLL_MS = 150;
 const SETTLE_QUIET_MS = 200;
@@ -189,7 +191,7 @@ function list() {
 // in its context suggested a flow could be kept. It names the params rule
 // explicitly because the commonest bad save was a varying value left out.
 const SAVE_GUIDANCE =
-  "Browser workflows: when you finish a multi-step browser flow (roughly five or more actions) that this project is likely to need again — submitting a form, logging in and reaching a page, a search with several filters, a routine admin task — save it right away with workflow_save, without being asked. In params, name every value that could differ next time (each text you typed and each option you chose that came from the task), not just the obvious ones. Do not save one-off exploration, pure reading or lookups, or flows of only a couple of steps.";
+  "Browser workflows: when you finish a multi-step browser flow (roughly five or more actions) that this project is likely to need again — submitting a form, logging in and reaching a page, a search with several filters, a routine admin task — save it right away with workflow_save, without being asked. In params, name every value that could differ next time (each text you typed and each option you chose that came from the task), not just the obvious ones. Do not save one-off exploration, pure reading or lookups, or flows of only a couple of steps. Each step waits up to 6s for its element; if the flow had a step that took longer to finish (a report generating, an upload processing, a slow redirect), save it with timeout_s set with a generous margin over how long it took, since load times vary between runs.";
 
 // Everything the server instructions say about workflows: when to save, and
 // what this project has already saved.
@@ -349,7 +351,7 @@ export function createWorkflows(dispatch) {
     return `${i}. ${s.tool}`;
   }
 
-  function save({ name, description = "", tabId, params = {}, drop = [] }) {
+  function save({ name, description = "", tabId, params = {}, drop = [], timeout_s }) {
     if (!name) return "workflow_save needs a name.";
     const start = marks.get(tabId) ?? 0;
     const steps = journal.slice(start).filter((e) => e.tabId === tabId && keep(e));
@@ -368,12 +370,14 @@ export function createWorkflows(dispatch) {
       });
     if (!kept.length) return `Nothing to save: no replayable actions on tab ${tabId} since its last save or run.`;
     const wf = { name: slug(name), description, params: Object.keys(params), fixed: fixedValues(kept), steps: kept, saved: new Date().toISOString() };
+    if (timeout_s > 0) wf.timeout_s = timeout_s;
     fs.mkdirSync(DIR, { recursive: true });
     const file = path.join(DIR, `${wf.name}.json`);
     fs.writeFileSync(file, JSON.stringify(wf, null, 2));
     return (
       `Saved workflow "${wf.name}" (${kept.length} steps${wf.params.length ? `, params: ${wf.params.join(", ")}` : ""}) to ${file}.\n` +
       kept.map((s, i) => describe(s, i + 1)).join("\n") +
+      (wf.timeout_s ? `\nEach step waits up to ${wf.timeout_s}s for its element.` : "") +
       (wf.fixed.length
         ? `\nFIXED — every run repeats these exactly as recorded: ${wf.fixed.map((v) => JSON.stringify(v)).join(", ")}. If any of them should differ between runs, save again with it in params.`
         : "") +
@@ -391,8 +395,8 @@ export function createWorkflows(dispatch) {
     return value;
   }
 
-  async function locate(tabId, anchor) {
-    const deadline = Date.now() + ANCHOR_WAIT_MS;
+  async function locate(tabId, anchor, waitMs) {
+    const deadline = Date.now() + waitMs;
     let last = null;
     while (Date.now() < deadline) {
       if (anchor.kind === "point") {
@@ -409,7 +413,7 @@ export function createWorkflows(dispatch) {
     return { miss: last?.miss === "covered" ? `covered by <${last.by}>` : last?.miss === "text" ? `found a different element ("${last.saw}")` : last?.miss === "ambiguous" ? `matched ${last.n} elements with that text` : last?.miss || "not found" };
   }
 
-  async function run({ name, tabId, params = {}, screenshot = true }) {
+  async function run({ name, tabId, params = {}, screenshot = true, timeout_s }) {
     const wf = list().find((w) => w.name === slug(name));
     if (!wf) {
       const names = list().map((w) => w.name);
@@ -425,6 +429,7 @@ export function createWorkflows(dispatch) {
         `If the task needs a different value for one of those, do the flow by hand (and re-save it with that value as a param).` }] };
     }
 
+    const waitMs = (timeout_s > 0 ? timeout_s : wf.timeout_s > 0 ? wf.timeout_s : ANCHOR_WAIT_MS / 1000) * 1000;
     const t0 = Date.now();
     const log = [];
     let stopped = null;
@@ -438,7 +443,7 @@ export function createWorkflows(dispatch) {
       // running before the previous step's consequence has arrived.
       if (i > 0 && s.at) {
         const want = substitute(s.at, params);
-        const deadline = Date.now() + ANCHOR_WAIT_MS;
+        const deadline = Date.now() + waitMs;
         let here = null;
         while (Date.now() < deadline && (here = await js(tabId, HERE).catch(() => null)) !== want) await sleep(POLL_MS);
         if (here !== want) {
@@ -447,10 +452,10 @@ export function createWorkflows(dispatch) {
         }
       }
       if (s.anchor) {
-        const where = await locate(tabId, substitute(s.anchor, params));
+        const where = await locate(tabId, substitute(s.anchor, params), waitMs);
         tLoc = Date.now() - ts;
         if (where.miss) {
-          stopped = `step ${i + 1} (${describe(s, i + 1).replace(/^\d+\. /, "")}): element ${where.miss}`;
+          stopped = `step ${i + 1} (${describe(s, i + 1).replace(/^\d+\. /, "")}): element ${where.miss} (waited ${waitMs / 1000}s; if the page is just slow, re-run with a larger timeout_s)`;
           break;
         }
         delete args.coordinate;
