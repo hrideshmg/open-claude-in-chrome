@@ -583,10 +583,17 @@ export function createWorkflows(dispatch, { codeRunner = () => null } = {}) {
     const t0 = Date.now();
     let last = from - 1;
     let stopped = null;
-    for (let i = from - 1; i < to; i++) {
-      stopped = await runStep(wf.steps[i], { ...ctx, first: i === 0 }, String(i + 1));
-      if (stopped) break;
-      last = i + 1;
+    // Script steps click without a mouse event; have the page draw the cursor
+    // for them for the length of the run.
+    await dispatch("workflow_cursor", { tabId, on: true });
+    try {
+      for (let i = from - 1; i < to; i++) {
+        stopped = await runStep(wf.steps[i], { ...ctx, first: i === 0 }, String(i + 1));
+        if (stopped) break;
+        last = i + 1;
+      }
+    } finally {
+      await dispatch("workflow_cursor", { tabId, on: false });
     }
     if (!stopped) await settle(tabId, FINAL_QUIET_MS, FINAL_MAX_MS);
     marks.set(tabId, journal.length);

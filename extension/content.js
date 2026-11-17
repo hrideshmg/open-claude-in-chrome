@@ -732,10 +732,34 @@
     cursorHideTimer = setTimeout(() => cursorEl && cursorEl.classList.remove("on"), CURSOR_IDLE_HIDE_MS);
   }
 
+  // Script clicks (el.click(), used by saved workflows) send no mouse event,
+  // so the cursor never moves for them. While a workflow run has switched this
+  // on, draw it at the clicked element. Untrusted clicks only: real and
+  // debugger-dispatched ones already come through showCursor.
+  let clickCursorOn = false;
+  function onScriptClick(e) {
+    if (e.isTrusted || !(e.target instanceof Element)) return;
+    const r = e.target.getBoundingClientRect();
+    if (!r.width && !r.height) return;
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+    const glideMs = cur ? Math.round(Math.min(650, 140 + 85 * Math.log2(Math.hypot(x - cur.x, y - cur.y) / 30 + 1))) : 0;
+    showCursor({ x, y, phase: "press", glideMs, follow: false });
+  }
+  function setClickCursor(on) {
+    if (on === clickCursorOn) return;
+    clickCursorOn = on;
+    if (on) document.addEventListener("click", onScriptClick, true);
+    else document.removeEventListener("click", onScriptClick, true);
+  }
+
   // --- Message handler ---
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "showCursor") {
       showCursor(msg);
+      return false;
+    }
+    if (msg.type === "clickCursor") {
+      setClickCursor(!!msg.on);
       return false;
     }
 

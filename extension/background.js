@@ -275,6 +275,11 @@ async function ensureTabGroup(createIfEmpty) {
     }
   }
 
+  // No group of ours: adopt one the operator made by hand and titled "MCP",
+  // instead of only finding it at service-worker start.
+  await recoverTabGroupState();
+  if (tabGroupId !== null && tabGroupTabs.size > 0) return;
+
   if (!createIfEmpty) return;
 
   // Create a new window with a tab, group it. focused:false — the window is
@@ -1430,7 +1435,22 @@ function dbg(kind, detail, extra) {
 }
 
 // --- Tool handlers ---
+// Tabs a workflow run is driving. Script steps click with el.click(), which
+// sends no mouse event, so the content script draws the cursor on those clicks
+// while a tab is in here. Internal: not in the tool definitions.
+const clickCursorTabs = new Set();
+const sendClickCursor = (tabId, on) =>
+  chrome.tabs.sendMessage(tabId, { type: "clickCursor", on }).catch(() => {});
+
 const toolHandlers = {
+  async workflow_cursor(args) {
+    const tabId = Number(args && args.tabId);
+    if (args && args.on) clickCursorTabs.add(tabId);
+    else clickCursorTabs.delete(tabId);
+    sendClickCursor(tabId, !!(args && args.on));
+    return { content: [{ type: "text", text: "ok" }] };
+  },
+
   async tabs_context_mcp(args) {
     await ensureTabGroup(args.createIfEmpty);
     if (tabGroupId === null) {
@@ -3522,7 +3542,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // This is what captures "the current state of the URL" as it changes.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) recordSwEvent("navigate", tabId, { url: changeInfo.url });
+  // A full page load drops the content script's state; tell the new one.
+  if (changeInfo.status === "complete" && clickCursorTabs.has(tabId)) sendClickCursor(tabId, true);
 });
+chrome.tabs.onRemoved.addListener((tabId) => clickCursorTabs.delete(tabId));
 
 // --- Init ---
 
