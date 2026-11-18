@@ -31,8 +31,9 @@ less overhead per action (0.12s vs 0.31s). Details and caveats are in the
 
 ## Install
 
-Requires Node.js 18+, Claude Code 2.1.80+ (2.0.73+ without recording), and an OpenAI
-API key if you want to record narrated demos.
+Requires Node.js 18+, an MCP client such as OpenCode or Claude Code, and an OpenAI
+API key if you want to record narrated demos. Claude Code requires version 2.1.80+
+for recording channels (2.0.73+ otherwise).
 
 ```bash
 npm install --prefix host
@@ -73,6 +74,30 @@ claude --dangerously-load-development-channels server:open-claude-in-chrome-hybr
 ```
 
 Check it works by asking Claude to open reddit.com and take a screenshot.
+
+### Add to OpenCode
+
+Add the hybrid server to `~/.config/opencode/opencode.json` (or your project's
+`opencode.json`), replacing the path with this checkout's absolute path:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "open-claude-in-chrome": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/host/codemode/server-hybrid.js"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Restart OpenCode after changing its configuration. Use `opencode mcp list` to check
+the connection, then ask it to open a page and take a screenshot. Browser tools and
+saved workflows work through MCP; automatic recording notifications use Claude Code's
+channel protocol and are not delivered to OpenCode. Recordings remain available in
+the extension's Options page.
 
 ### Server variants
 
